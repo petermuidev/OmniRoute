@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.14] — 2026-03-08
+
+> ### 🐛 Bug Fixes + Electron Release Fix
+
+### 🐛 Bug Fixes
+
+- **#243 — OpenAI-Compatible model name stripping** — Fixed `model.split("/").pop()` stripping vendor namespace from model names with slashes. Models like `moonshotai/Kimi-K2-Instruct` were being truncated to just `Kimi-K2-Instruct`. Now uses `slice(1).join("/")` to preserve the full vendor/model path
+- **#242 — Multimodal image_url rejection on Responses API** — Fixed `image_url` content parts from Chat Completions format being passed through without conversion to `input_image` format expected by Responses/Codex backends. Now properly converts `{type: "image_url", image_url: {url: "..."}}` → `{type: "input_image", image_url: "..."}`
+
+### 🔧 Infrastructure
+
+- **PR #241 — Electron release workflow** — Synced `electron/package.json` version to `2.0.13`, separated macOS x64 and arm64 into dedicated CI runner jobs, using `macos-13` (Intel) runner for x64 builds to prevent cross-compilation timeouts (thanks @benzntech)
+
+### 📁 Files Changed
+
+| File                                              | Change                                                   |
+| ------------------------------------------------- | -------------------------------------------------------- |
+| `open-sse/executors/default.ts`                   | Fix model name stripping: `pop()` → `slice(1).join("/")` |
+| `open-sse/translator/request/openai-responses.ts` | Convert `image_url` → `input_image` for Responses API    |
+| `.github/workflows/electron-release.yml`          | Separate mac x64/arm64 builds                            |
+| `electron/package.json`                           | Version sync + arch-specific build scripts               |
+
+---
+
 ## [2.0.11] — 2026-03-07
 
 > ### 🤖 ACP Agents Dashboard + Anti-Ban Docs
