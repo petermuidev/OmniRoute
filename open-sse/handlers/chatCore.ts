@@ -955,6 +955,11 @@ export async function handleChatCore({
           ? translatedBody
           : { ...translatedBody, model: modelToCall };
 
+      // Some BYOK clients (including Droid/Cursor-style custom model adapters) send
+      // prompt_cache_retention even when the selected upstream provider does not
+      // support it. Preserve prompt_cache_key, but strip this compatibility field.
+      delete bodyToSend.prompt_cache_retention;
+
       // Inject prompt_cache_key for OpenAI providers if not already set
       if (
         targetFormat === FORMATS.OPENAI &&

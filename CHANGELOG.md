@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### 🚀 Features
+
+- **Image Edits API:** Add image edits endpoint supporting DALL-E and Gemini providers
+- **Side-by-Side Runner:** Add config and script for running dual OmniRoute instances on different ports
+
 ---
 
-## [3.3.9] - 2026-03-31
+## [3.3.10] - 2026-04-01
 
 ### 🐛 Bug Fixes
 

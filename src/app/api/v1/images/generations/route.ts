@@ -1,17 +1,19 @@
 import { CORS_ORIGIN } from "@/shared/utils/cors";
 import { handleImageGeneration } from "@omniroute/open-sse/handlers/imageGeneration.ts";
+import { unavailableResponse } from "@omniroute/open-sse/utils/error.ts";
 import {
   getProviderCredentials,
   clearRecoveredProviderState,
   extractApiKey,
   isValidApiKey,
+  markAccountUnavailable,
 } from "@/sse/services/auth";
 import {
   parseImageModel,
   getAllImageModels,
   getImageProvider,
 } from "@omniroute/open-sse/config/imageRegistry.ts";
-import { errorResponse, unavailableResponse } from "@omniroute/open-sse/utils/error.ts";
+import { errorResponse } from "@omniroute/open-sse/utils/error.ts";
 import { HTTP_STATUS } from "@omniroute/open-sse/config/constants.ts";
 import * as log from "@/sse/utils/logger";
 import { toJsonErrorPayload } from "@/shared/utils/upstreamError";
@@ -143,63 +145,120 @@ export async function POST(request) {
     );
   }
 
-  // Check provider config for auth bypass
   const providerConfig = getImageProvider(provider);
 
-  // Get credentials — skip for local providers (authType: "none")
-  let credentials = null;
-  if (providerConfig && providerConfig.authType !== "none") {
-    credentials = await getProviderCredentials(provider);
-    if (!credentials) {
-      return errorResponse(
-        HTTP_STATUS.BAD_REQUEST,
-        `No credentials for image provider: ${provider}`
-      );
-    }
-    if (credentials.allRateLimited) {
-      return unavailableResponse(
-        HTTP_STATUS.RATE_LIMITED,
-        `[${provider}] All accounts rate limited`,
-        credentials.retryAfter,
-        credentials.retryAfterHuman
-      );
-    }
-  } else if (isCustomModel) {
-    credentials = await getProviderCredentials(provider);
-    if (!credentials) {
-      return errorResponse(
-        HTTP_STATUS.BAD_REQUEST,
-        `No credentials for custom image provider: ${provider}`
-      );
-    }
-    if (credentials.allRateLimited) {
-      return unavailableResponse(
-        HTTP_STATUS.RATE_LIMITED,
-        `[${provider}] All accounts rate limited`,
-        credentials.retryAfter,
-        credentials.retryAfterHuman
-      );
-    }
-  }
+  const needsCredentials = (providerConfig && providerConfig.authType !== "none") || isCustomModel;
+  const lockoutModel = body.model.startsWith(`${provider}/`)
+    ? body.model.slice(provider.length + 1)
+    : body.model;
 
-  const result = await handleImageGeneration({
-    body,
-    credentials,
-    log,
-    ...(isCustomModel && { resolvedProvider: provider }),
-  });
+  let excludeConnectionId = null;
+  let lastError = null;
+  let lastStatus = null;
 
-  if (result.success) {
-    await clearRecoveredProviderState(credentials);
-    return new Response(JSON.stringify((result as any).data), {
-      status: 200,
+  while (true) {
+    let credentials = null;
+    if (needsCredentials) {
+      credentials = await getProviderCredentials(provider, excludeConnectionId);
+      if (!credentials || credentials.allRateLimited) {
+        return handleNoImageCredentials({
+          credentials,
+          excludeConnectionId,
+          provider,
+          model: lockoutModel,
+          lastError,
+          lastStatus,
+          noCredentialsMessage: isCustomModel
+            ? `No credentials for custom image provider: ${provider}`
+            : `No credentials for image provider: ${provider}`,
+        });
+      }
+    }
+
+    const result = await handleImageGeneration({
+      body,
+      credentials,
+      log,
+      ...(isCustomModel && { resolvedProvider: provider }),
+    });
+
+    if (result.success) {
+      await clearRecoveredProviderState(credentials);
+      return new Response(JSON.stringify((result as any).data), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (!credentials?.connectionId) {
+      const errorPayload = toJsonErrorPayload(
+        (result as any).error,
+        "Image generation provider error"
+      );
+      return new Response(JSON.stringify(errorPayload), {
+        status: (result as any).status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const { shouldFallback } = await markAccountUnavailable(
+      credentials.connectionId,
+      (result as any).status,
+      String((result as any).error || "Image generation provider error"),
+      provider,
+      lockoutModel
+    );
+
+    if (shouldFallback) {
+      excludeConnectionId = credentials.connectionId;
+      lastError = String((result as any).error || "Image generation provider error");
+      lastStatus = Number((result as any).status) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+      continue;
+    }
+
+    const errorPayload = toJsonErrorPayload(
+      (result as any).error,
+      "Image generation provider error"
+    );
+    return new Response(JSON.stringify(errorPayload), {
+      status: (result as any).status,
       headers: { "Content-Type": "application/json" },
     });
   }
+}
 
-  const errorPayload = toJsonErrorPayload((result as any).error, "Image generation provider error");
+function handleNoImageCredentials({
+  credentials,
+  excludeConnectionId,
+  provider,
+  model,
+  lastError,
+  lastStatus,
+  noCredentialsMessage,
+}) {
+  if (credentials?.allRateLimited) {
+    const errorMsg = lastError || credentials.lastError || "Unavailable";
+    const status =
+      lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+    log.warn("IMAGE", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+    return unavailableResponse(
+      status,
+      `[${provider}/${model}] ${errorMsg}`,
+      credentials.retryAfter,
+      credentials.retryAfterHuman
+    );
+  }
+
+  if (!excludeConnectionId) {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, noCredentialsMessage);
+  }
+
+  const errorPayload = toJsonErrorPayload(
+    lastError || "All accounts unavailable",
+    noCredentialsMessage
+  );
   return new Response(JSON.stringify(errorPayload), {
-    status: (result as any).status,
+    status: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE,
     headers: { "Content-Type": "application/json" },
   });
 }

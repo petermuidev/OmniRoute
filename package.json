@@ -47,9 +47,11 @@
   "homepage": "https://omniroute.online",
   "scripts": {
     "dev": "node scripts/run-next.mjs dev",
+    "dev:side-by-side": "./scripts/run-side-by-side.sh dev",
     "build": "node scripts/build-next-isolated.mjs",
     "build:cli": "node scripts/prepublish.mjs",
     "start": "node scripts/run-next.mjs start",
+    "start:side-by-side": "./scripts/run-side-by-side.sh start",
     "lint": "eslint .",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:20128 && cd electron && npm run dev\"",
     "electron:build": "npm run build && cd electron && npm run build",

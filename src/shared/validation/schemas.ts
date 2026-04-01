@@ -245,6 +245,58 @@ export const v1ImageGenerationSchema = z
   })
   .catchall(z.unknown());
 
+export const v1ImageEditSchema = z
+  .object({
+    model: modelIdSchema,
+    prompt: nonEmptyStringSchema,
+    image: z.string().trim().min(1).optional(),
+    image_url: z.string().trim().min(1).optional(),
+    image_data_base64: z.string().trim().min(1).optional(),
+    image_mime_type: z.string().trim().min(1).optional(),
+    size: z
+      .string()
+      .trim()
+      .regex(/^\d+([x*])\d+$/i, "size must look like WIDTHxHEIGHT")
+      .optional(),
+    width: z.coerce.number().int().positive().optional(),
+    height: z.coerce.number().int().positive().optional(),
+    negative_prompt: z.string().optional(),
+    region: z.string().trim().min(1).optional(),
+    seed: z.coerce.number().int().optional(),
+    true_cfg_scale: z.coerce.number().positive().optional(),
+    num_inference_steps: z.coerce.number().int().positive().optional(),
+  })
+  .catchall(z.unknown())
+  .superRefine((data, ctx) => {
+    const providedSources = [data.image, data.image_url, data.image_data_base64].filter(
+      (item) => typeof item === "string" && item.trim().length > 0
+    );
+
+    if (providedSources.length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Exactly one image input source is required",
+        path: ["image"],
+      });
+    }
+
+    if (data.image_data_base64 && !data.image_mime_type) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "image_mime_type is required when image_data_base64 is provided",
+        path: ["image_mime_type"],
+      });
+    }
+
+    if ((data.width && !data.height) || (!data.width && data.height)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "width and height must be provided together",
+        path: ["width"],
+      });
+    }
+  });
+
 export const v1AudioSpeechSchema = z
   .object({
     model: modelIdSchema,

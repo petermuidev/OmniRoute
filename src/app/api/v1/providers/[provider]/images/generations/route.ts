@@ -1,12 +1,14 @@
 import { CORS_ORIGIN } from "@/shared/utils/cors";
 import { handleImageGeneration } from "@omniroute/open-sse/handlers/imageGeneration.ts";
-import { errorResponse, unavailableResponse } from "@omniroute/open-sse/utils/error.ts";
+import { unavailableResponse } from "@omniroute/open-sse/utils/error.ts";
+import { errorResponse } from "@omniroute/open-sse/utils/error.ts";
 import { HTTP_STATUS } from "@omniroute/open-sse/config/constants.ts";
 import {
   getProviderCredentials,
   clearRecoveredProviderState,
   extractApiKey,
   isValidApiKey,
+  markAccountUnavailable,
 } from "@/sse/services/auth";
 import { getImageProvider } from "@omniroute/open-sse/config/imageRegistry.ts";
 import * as log from "@/sse/utils/logger";
@@ -78,35 +80,94 @@ export async function POST(request, { params }) {
     );
   }
 
-  const credentials = await getProviderCredentials(rawProvider);
-  if (!credentials) {
-    return errorResponse(
-      HTTP_STATUS.BAD_REQUEST,
-      `No credentials for image provider: ${rawProvider}`
+  const lockoutModel = body.model.startsWith(`${rawProvider}/`)
+    ? body.model.slice(rawProvider.length + 1)
+    : body.model;
+
+  let excludeConnectionId = null;
+  let lastError = null;
+  let lastStatus = null;
+
+  while (true) {
+    const credentials = await getProviderCredentials(rawProvider, excludeConnectionId);
+    if (!credentials || credentials.allRateLimited) {
+      return handleNoImageCredentials({
+        credentials,
+        excludeConnectionId,
+        provider: rawProvider,
+        model: lockoutModel,
+        lastError,
+        lastStatus,
+      });
+    }
+
+    const result = await handleImageGeneration({ body, credentials, log });
+
+    if (result.success) {
+      await clearRecoveredProviderState(credentials);
+      return new Response(JSON.stringify((result as any).data), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const { shouldFallback } = await markAccountUnavailable(
+      credentials.connectionId,
+      (result as any).status,
+      String((result as any).error || "Image generation provider error"),
+      rawProvider,
+      lockoutModel
     );
+
+    if (shouldFallback) {
+      excludeConnectionId = credentials.connectionId;
+      lastError = String((result as any).error || "Image generation provider error");
+      lastStatus = Number((result as any).status) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+      continue;
+    }
+
+    const errorPayload = toJsonErrorPayload(
+      (result as any).error,
+      "Image generation provider error"
+    );
+    return new Response(JSON.stringify(errorPayload), {
+      status: (result as any).status,
+      headers: { "Content-Type": "application/json" },
+    });
   }
-  if (credentials.allRateLimited) {
+}
+
+function handleNoImageCredentials({
+  credentials,
+  excludeConnectionId,
+  provider,
+  model,
+  lastError,
+  lastStatus,
+}) {
+  if (credentials?.allRateLimited) {
+    const errorMsg = lastError || credentials.lastError || "Unavailable";
+    const status =
+      lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+    log.warn("IMAGE", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
     return unavailableResponse(
-      HTTP_STATUS.RATE_LIMITED,
-      `[${rawProvider}] All accounts rate limited`,
+      status,
+      `[${provider}/${model}] ${errorMsg}`,
       credentials.retryAfter,
       credentials.retryAfterHuman
     );
   }
 
-  const result = await handleImageGeneration({ body, credentials, log });
-
-  if (result.success) {
-    await clearRecoveredProviderState(credentials);
-    return new Response(JSON.stringify((result as any).data), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+  if (!excludeConnectionId) {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for image provider: ${provider}`);
   }
 
-  const errorPayload = toJsonErrorPayload((result as any).error, "Image generation provider error");
+  const errorPayload = toJsonErrorPayload(
+    lastError || "All accounts unavailable",
+    "Image generation provider error"
+  );
   return new Response(JSON.stringify(errorPayload), {
-    status: (result as any).status,
+    status: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE,
     headers: { "Content-Type": "application/json" },
   });
 }
